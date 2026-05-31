@@ -1,5 +1,6 @@
 import Stripe from 'stripe'
 import prisma from '@opsboard/db'
+import type { SubscriptionStatus } from '@opsboard/db'
 
 if (!process.env.STRIPE_SECRET_KEY) {
   console.warn('STRIPE_SECRET_KEY is not defined. Stripe integration will not work.')
@@ -8,6 +9,25 @@ if (!process.env.STRIPE_SECRET_KEY) {
 export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
   apiVersion: '2024-06-20',
 })
+
+/**
+ * Mapeia o status de assinatura do Stripe para o enum do Prisma.
+ * Garante type-safety e evita `as any`.
+ */
+function mapStripeStatusToPrisma(status: Stripe.Subscription.Status): SubscriptionStatus {
+  const map: Record<string, SubscriptionStatus> = {
+    active: 'active',
+    past_due: 'past_due',
+    canceled: 'canceled',
+    trialing: 'trialing',
+    // Statuses sem correspondência direta no enum são tratados como canceled
+    unpaid: 'canceled',
+    incomplete: 'past_due',
+    incomplete_expired: 'canceled',
+    paused: 'canceled',
+  }
+  return map[status] ?? 'canceled'
+}
 
 // Webhook payload parser (Fastify requires raw body for Stripe signature validation)
 export const handleWebhook = async (request: any, reply: any) => {
@@ -18,7 +38,6 @@ export const handleWebhook = async (request: any, reply: any) => {
 
   try {
     if (!webhookSecret) throw new Error('Missing webhook secret')
-    // Note: Fastify needs to be configured to expose raw body for this route
     event = stripe.webhooks.constructEvent(request.rawBody, sig, webhookSecret)
   } catch (err: any) {
     request.log.error(`Webhook signature verification failed: ${err.message}`)
@@ -31,34 +50,36 @@ export const handleWebhook = async (request: any, reply: any) => {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session
         const workspaceId = session.client_reference_id
-        
+
         if (workspaceId && session.subscription) {
           await prisma.workspace.update({
             where: { id: workspaceId },
             data: {
               stripeCustomerId: session.customer as string,
               stripeSubscriptionId: session.subscription as string,
-              plan: 'pro', // Defaulting to pro on checkout success for MVP
+              plan: 'pro',
               subscriptionStatus: 'active',
             },
           })
-          
+
           await prisma.activityLog.create({
             data: {
-               workspaceId,
-               action: 'plan_upgraded',
-               entityType: 'workspace',
-               entityId: workspaceId,
-            }
+              workspaceId,
+              action: 'plan_upgraded',
+              entityType: 'workspace',
+              entityId: workspaceId,
+            },
           })
         }
         break
       }
-      
+
       case 'customer.subscription.updated':
       case 'customer.subscription.deleted': {
         const subscription = event.data.object as Stripe.Subscription
-        const status = subscription.status
+        // ✅ Mapeamento explícito sem `as any`
+        const mappedStatus = mapStripeStatusToPrisma(subscription.status)
+        const isActive = mappedStatus === 'active' || mappedStatus === 'trialing'
 
         const workspace = await prisma.workspace.findUnique({
           where: { stripeSubscriptionId: subscription.id },
@@ -68,25 +89,26 @@ export const handleWebhook = async (request: any, reply: any) => {
           await prisma.workspace.update({
             where: { id: workspace.id },
             data: {
-              subscriptionStatus: status as any,
+              subscriptionStatus: mappedStatus,
               currentPeriodEnd: new Date(subscription.current_period_end * 1000),
-              plan: status === 'active' || status === 'trialing' ? workspace.plan : 'free',
+              plan: isActive ? workspace.plan : 'free',
             },
           })
 
-          if (status === 'canceled' || status === 'unpaid') {
-             await prisma.activityLog.create({
-               data: {
-                 workspaceId: workspace.id,
-                 action: 'plan_downgraded',
-                 entityType: 'workspace',
-                 entityId: workspace.id,
-               }
-             })
+          if (!isActive) {
+            await prisma.activityLog.create({
+              data: {
+                workspaceId: workspace.id,
+                action: 'plan_downgraded',
+                entityType: 'workspace',
+                entityId: workspace.id,
+              },
+            })
           }
         }
         break
       }
+
       default:
         request.log.info(`Unhandled event type ${event.type}`)
     }
@@ -98,24 +120,28 @@ export const handleWebhook = async (request: any, reply: any) => {
   reply.send({ received: true })
 }
 
-export async function createCheckoutSession(workspaceId: string, successUrl: string, cancelUrl: string) {
-   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } })
-   if (!workspace) throw new Error("Workspace not found")
+export async function createCheckoutSession(
+  workspaceId: string,
+  successUrl: string,
+  cancelUrl: string
+) {
+  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } })
+  if (!workspace) throw new Error('Workspace not found')
 
-   const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      mode: 'subscription',
-      client_reference_id: workspaceId,
-      customer: workspace.stripeCustomerId || undefined,
-      line_items: [
-         {
-            price: process.env.STRIPE_PRO_PRICE_ID || 'price_test_123',
-            quantity: 1,
-         }
-      ],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-   })
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    mode: 'subscription',
+    client_reference_id: workspaceId,
+    customer: workspace.stripeCustomerId || undefined,
+    line_items: [
+      {
+        price: process.env.STRIPE_PRO_PRICE_ID || 'price_test_123',
+        quantity: 1,
+      },
+    ],
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+  })
 
-   return session.url
+  return session.url
 }
