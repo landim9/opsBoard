@@ -3,8 +3,17 @@ import Redis from 'ioredis'
 import prisma from '@opsboard/db'
 import { CronExpressionParser } from 'cron-schedule'
 
+// ✅ Conexão Redis com handler de erro explícito para evitar crashes silenciosos
 const connection = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: null,
+})
+
+connection.on('error', (err) => {
+  console.error('[Redis] Connection error:', err.message)
+})
+
+connection.on('reconnecting', () => {
+  console.warn('[Redis] Reconnecting...')
 })
 
 // ==========================================
@@ -20,24 +29,32 @@ export const overdueQueue = new Queue('overdue-checker', { connection })
 /**
  * Verifica se uma rotina deve gerar uma execução hoje,
  * baseando-se na frequência e/ou cronExpression configurada.
+ *
+ * @param routine - Objeto com frequência e cronExpression
+ * @param timezone - Timezone do workspace (padrão: UTC)
  */
-function shouldRunToday(routine: {
-  frequency: string
-  cronExpression: string | null
-}): boolean {
-  const now = new Date()
+function shouldRunToday(
+  routine: { frequency: string; cronExpression: string | null },
+  timezone = 'UTC'
+): boolean {
+  // Usa a timezone do workspace para determinar o "hoje" correto
+  const now = new Date(
+    new Date().toLocaleString('en-US', { timeZone: timezone })
+  )
 
   // Rotinas com cronExpression customizada: usa cron-schedule
   if (routine.cronExpression) {
     try {
       const cron = CronExpressionParser.parse(routine.cronExpression)
-      // Verifica se o cron está previsto para hoje
       const prev = cron.prev()
       const todayStart = new Date(now)
       todayStart.setHours(0, 0, 0, 0)
       return prev >= todayStart
     } catch {
       // Se o cron for inválido, cai no fallback por frequência
+      console.warn(
+        `[Worker] cronExpression inválida para rotina com frequência "${routine.frequency}". Usando fallback.`
+      )
     }
   }
 
@@ -46,11 +63,9 @@ function shouldRunToday(routine: {
     case 'daily':
       return true
     case 'weekly':
-      // Executa toda segunda-feira (dia 1)
-      return now.getDay() === 1
+      return now.getDay() === 1 // Segunda-feira
     case 'monthly':
-      // Executa no primeiro dia do mês
-      return now.getDate() === 1
+      return now.getDate() === 1 // Primeiro do mês
     default:
       return false
   }
@@ -74,17 +89,23 @@ export const routineWorker = new Worker(
         slaHours: true,
         frequency: true,
         cronExpression: true,
+        // ✅ Incluindo timezone do workspace para shouldRunToday
+        workspace: {
+          select: { timezone: true },
+        },
       },
     })
 
     let createdCount = 0
 
     for (const routine of activeRoutines) {
-      // Pula rotinas que não estão agendadas para hoje
-      if (!shouldRunToday(routine)) continue
+      const timezone = (routine as any).workspace?.timezone ?? 'UTC'
 
-      // Evita criar duplicatas para o mesmo dia
-      const todayStart = new Date()
+      if (!shouldRunToday(routine, timezone)) continue
+
+      const todayStart = new Date(
+        new Date().toLocaleString('en-US', { timeZone: timezone })
+      )
       todayStart.setHours(0, 0, 0, 0)
 
       const existing = await prisma.execution.findFirst({
@@ -95,7 +116,6 @@ export const routineWorker = new Worker(
       })
 
       if (!existing) {
-        // Calcula due date com base no SLA ou fim do dia
         const dueAt = new Date()
         if (routine.slaHours) {
           dueAt.setTime(Date.now() + routine.slaHours * 60 * 60 * 1000)
@@ -154,7 +174,7 @@ export async function startWorkers() {
     {},
     {
       repeat: {
-        pattern: '0 0 * * *', // Todo dia à meia-noite
+        pattern: '0 0 * * *', // Todo dia à meia-noite UTC
       },
     }
   )
