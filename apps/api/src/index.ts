@@ -6,6 +6,13 @@ import rateLimit from '@fastify/rate-limit'
 import { handleWebhook, createCheckoutSession } from './stripe'
 import { startWorkers } from './workers'
 
+// ✅ Segurança: não subir com JWT secret padrão em nenhum ambiente
+if (!process.env.JWT_SECRET) {
+  throw new Error(
+    'JWT_SECRET não definido. Defina a variável de ambiente antes de iniciar o servidor.'
+  )
+}
+
 const fastify = Fastify({
   logger: process.env.NODE_ENV === 'development',
 })
@@ -27,34 +34,56 @@ fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, bo
 fastify.register(cors, { origin: true })
 fastify.register(helmet)
 fastify.register(rateLimit, { max: 100, timeWindow: '1 minute' })
-fastify.register(jwt, { secret: process.env.JWT_SECRET || 'supersecret' })
+fastify.register(jwt, { secret: process.env.JWT_SECRET })
+
+// ✅ Hook de autenticação reutilízavel
+const authenticate = async (request: any, reply: any) => {
+  try {
+    await request.jwtVerify()
+  } catch (err) {
+    reply.status(401).send({ error: 'Unauthorized' })
+  }
+}
 
 // Routes
 fastify.get('/health', async () => {
   return { status: 'ok', timestamp: new Date().toISOString() }
 })
 
-// Stripe Webhooks (Raw Body)
+// Stripe Webhooks (Raw Body — sem autenticação JWT, usa assinatura Stripe)
 fastify.post('/webhooks/stripe', { config: { rawBody: true } }, handleWebhook)
 
-// Checkout Endpoint
-fastify.post('/api/billing/checkout', async (request, reply) => {
-   // Stub: In prod, require auth and get workspaceId from JWT
-   const { workspaceId, successUrl, cancelUrl } = request.body as any
-   try {
-     const url = await createCheckoutSession(workspaceId, successUrl, cancelUrl)
-     return { url }
-   } catch (err: any) {
-     return reply.status(500).send({ error: err.message })
-   }
-})
+// ✅ Checkout protegido por JWT
+fastify.post(
+  '/api/billing/checkout',
+  { preHandler: [authenticate] },
+  async (request, reply) => {
+    // workspaceId vem do JWT para garantir que o usuário só acessa o próprio workspace
+    const jwtPayload = (request as any).user as { workspaceId: string }
+    const { successUrl, cancelUrl } = request.body as {
+      successUrl: string
+      cancelUrl: string
+    }
+
+    if (!jwtPayload?.workspaceId) {
+      return reply.status(400).send({ error: 'workspaceId ausente no token JWT' })
+    }
+
+    try {
+      const url = await createCheckoutSession(jwtPayload.workspaceId, successUrl, cancelUrl)
+      return { url }
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message })
+    }
+  }
+)
 
 // Start
 const start = async () => {
   try {
     await fastify.listen({ port: Number(process.env.PORT) || 3001, host: '0.0.0.0' })
     console.log(`API running on port ${process.env.PORT || 3001}`)
-    
+
     // Start background workers
     if (process.env.NODE_ENV !== 'test') {
       await startWorkers()
