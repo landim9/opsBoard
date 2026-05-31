@@ -22,14 +22,20 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
   .split(',')
   .map((o) => o.trim())
 
+// ✅ Interface tipada para evitar `as any` no raw body do Stripe
+declare module 'fastify' {
+  interface FastifyRequest {
+    rawBody?: Buffer
+  }
+}
+
 // Plugins
 fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
-  // Capture raw body for Stripe signatures
   try {
     if (req.url.startsWith('/webhooks/stripe')) {
-      ;(req as any).rawBody = body
+      req.rawBody = body as Buffer
     }
-    const json = JSON.parse(body.toString())
+    const json = JSON.parse((body as Buffer).toString())
     done(null, json)
   } catch (err) {
     done(err as Error, undefined)
@@ -38,7 +44,6 @@ fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, bo
 
 fastify.register(cors, {
   origin: (origin, cb) => {
-    // Permitir requisições sem origin (ex: curl, server-to-server)
     if (!origin || allowedOrigins.includes(origin)) {
       cb(null, true)
     } else {
@@ -51,11 +56,16 @@ fastify.register(helmet)
 fastify.register(rateLimit, { max: 100, timeWindow: '1 minute' })
 fastify.register(jwt, { secret: process.env.JWT_SECRET })
 
-// ✅ Hook de autenticação reutilizável
+// ✅ Tipos explícitos no hook de autenticação
+interface JwtPayload {
+  workspaceId: string
+  userId: string
+}
+
 const authenticate = async (request: any, reply: any) => {
   try {
     await request.jwtVerify()
-  } catch (err) {
+  } catch {
     reply.status(401).send({ error: 'Unauthorized' })
   }
 }
@@ -73,8 +83,7 @@ fastify.post(
   '/api/billing/checkout',
   { preHandler: [authenticate] },
   async (request, reply) => {
-    // workspaceId vem do JWT para garantir que o usuário só acessa o próprio workspace
-    const jwtPayload = (request as any).user as { workspaceId: string }
+    const jwtPayload = (request as any).user as JwtPayload
     const { successUrl, cancelUrl } = request.body as {
       successUrl: string
       cancelUrl: string
@@ -87,8 +96,9 @@ fastify.post(
     try {
       const url = await createCheckoutSession(jwtPayload.workspaceId, successUrl, cancelUrl)
       return { url }
-    } catch (err: any) {
-      return reply.status(500).send({ error: err.message })
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Internal server error'
+      return reply.status(500).send({ error: message })
     }
   }
 )
@@ -99,7 +109,6 @@ const start = async () => {
     await fastify.listen({ port: Number(process.env.PORT) || 3001, host: '0.0.0.0' })
     console.log(`API running on port ${process.env.PORT || 3001}`)
 
-    // Start background workers
     if (process.env.NODE_ENV !== 'test') {
       await startWorkers()
     }

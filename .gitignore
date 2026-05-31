@@ -38,3 +38,6 @@ Thumbs.db
 # Editor
 .vscode/settings.json
 .idea
+
+# Documentos internos de produto (não pertencem ao repo público)
+branding_*.md
