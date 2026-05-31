@@ -17,6 +17,11 @@ const fastify = Fastify({
   logger: process.env.NODE_ENV === 'development',
 })
 
+// ✅ CORS com origens explícitas — nunca usar origin: true em produção
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
+  .split(',')
+  .map((o) => o.trim())
+
 // Plugins
 fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
   // Capture raw body for Stripe signatures
@@ -31,12 +36,22 @@ fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, bo
   }
 })
 
-fastify.register(cors, { origin: true })
+fastify.register(cors, {
+  origin: (origin, cb) => {
+    // Permitir requisições sem origin (ex: curl, server-to-server)
+    if (!origin || allowedOrigins.includes(origin)) {
+      cb(null, true)
+    } else {
+      cb(new Error('Not allowed by CORS'), false)
+    }
+  },
+  credentials: true,
+})
 fastify.register(helmet)
 fastify.register(rateLimit, { max: 100, timeWindow: '1 minute' })
 fastify.register(jwt, { secret: process.env.JWT_SECRET })
 
-// ✅ Hook de autenticação reutilízavel
+// ✅ Hook de autenticação reutilizável
 const authenticate = async (request: any, reply: any) => {
   try {
     await request.jwtVerify()

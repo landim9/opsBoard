@@ -2,11 +2,14 @@ import Stripe from 'stripe'
 import prisma from '@opsboard/db'
 import type { SubscriptionStatus } from '@opsboard/db'
 
+// ✅ Falha explicitamente se a chave não estiver definida (igual ao JWT_SECRET)
 if (!process.env.STRIPE_SECRET_KEY) {
-  console.warn('STRIPE_SECRET_KEY is not defined. Stripe integration will not work.')
+  throw new Error(
+    'STRIPE_SECRET_KEY não definido. Defina a variável de ambiente antes de iniciar o servidor.'
+  )
 }
 
-export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', {
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2024-06-20',
 })
 
@@ -128,6 +131,10 @@ export async function createCheckoutSession(
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } })
   if (!workspace) throw new Error('Workspace not found')
 
+  if (!process.env.STRIPE_PRO_PRICE_ID) {
+    throw new Error('STRIPE_PRO_PRICE_ID não definido.')
+  }
+
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ['card'],
     mode: 'subscription',
@@ -135,7 +142,7 @@ export async function createCheckoutSession(
     customer: workspace.stripeCustomerId || undefined,
     line_items: [
       {
-        price: process.env.STRIPE_PRO_PRICE_ID || 'price_test_123',
+        price: process.env.STRIPE_PRO_PRICE_ID,
         quantity: 1,
       },
     ],
