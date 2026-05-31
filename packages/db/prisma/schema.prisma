@@ -1,0 +1,279 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum PlanTier {
+  free
+  pro
+  business
+}
+
+enum WorkspaceRole {
+  owner
+  manager
+  executor
+  viewer
+}
+
+enum RoutineFrequency {
+  daily
+  weekly
+  monthly
+  custom
+}
+
+enum ExecutionStatus {
+  pending
+  done
+  skipped
+  issue
+  overdue
+}
+
+enum SubscriptionStatus {
+  active
+  past_due
+  canceled
+  trialing
+}
+
+enum LogAction {
+  created
+  updated
+  deleted
+  executed
+  invited
+  role_changed
+  plan_upgraded
+  plan_downgraded
+  login
+  login_failed
+  exported
+  quota_hit
+}
+
+// ============================================================
+// WORKSPACES (Tenant root)
+// ============================================================
+
+model Workspace {
+  id                   String             @id @default(uuid())
+  name                 String             @db.VarChar(120)
+  slug                 String             @unique @db.VarChar(60)
+  logoUrl              String?
+  plan                 PlanTier           @default(free)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  subscriptionStatus   SubscriptionStatus @default(active)
+  currentPeriodEnd     DateTime?
+  parentWorkspaceId    String?
+  settings             Json               @default("{}")
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  // Relations
+  parent      Workspace?          @relation("WorkspaceHierarchy", fields: [parentWorkspaceId], references: [id])
+  children    Workspace[]         @relation("WorkspaceHierarchy")
+  members     WorkspaceMember[]
+  invitations Invitation[]
+  routines    Routine[]
+  executions  Execution[]
+  activityLogs ActivityLog[]
+
+  @@index([slug])
+  @@index([parentWorkspaceId])
+  @@map("workspaces")
+}
+
+// ============================================================
+// USERS
+// ============================================================
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique @db.VarChar(254)
+  emailVerified Boolean   @default(false)
+  name          String?   @db.VarChar(100)
+  avatarUrl     String?
+  passwordHash  String?
+  totpSecret    String?   // AES-256 encrypted at app level
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  memberships       WorkspaceMember[]
+  invitationsSent   Invitation[]      @relation("InvitedBy")
+  routinesCreated   Routine[]         @relation("RoutineCreatedBy")
+  routinesAssigned  Routine[]         @relation("RoutineAssignedTo")
+  executionsAssigned Execution[]      @relation("ExecutionAssignedTo")
+  executionsDone    Execution[]       @relation("ExecutionExecutedBy")
+  activityLogs      ActivityLog[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// ============================================================
+// WORKSPACE MEMBERS (RBAC junction)
+// ============================================================
+
+model WorkspaceMember {
+  id          String        @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(executor)
+  invitedById String?
+  joinedAt    DateTime?
+  createdAt   DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+// ============================================================
+// INVITATIONS
+// ============================================================
+
+model Invitation {
+  id          String        @id @default(uuid())
+  workspaceId String
+  email       String        @db.VarChar(254)
+  role        WorkspaceRole @default(executor)
+  token       String        @unique @default(cuid())
+  invitedById String
+  acceptedAt  DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User      @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  @@map("invitations")
+}
+
+// ============================================================
+// ROUTINES
+// ============================================================
+
+model Routine {
+  id             String           @id @default(uuid())
+  workspaceId    String
+  title          String           @db.VarChar(200)
+  description    String?
+  frequency      RoutineFrequency
+  cronExpression String?          @db.VarChar(100)
+  scheduledTime  String?          // "HH:MM" format
+  assignedToId   String?
+  slaHours       Int?
+  isActive       Boolean          @default(true)
+  checklist      Json             @default("[]")
+  tags           String[]
+  createdById    String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assignedTo User?       @relation("RoutineAssignedTo", fields: [assignedToId], references: [id])
+  createdBy  User        @relation("RoutineCreatedBy", fields: [createdById], references: [id])
+  executions Execution[]
+
+  @@index([workspaceId])
+  @@index([assignedToId])
+  @@index([workspaceId, isActive])
+  @@map("routines")
+}
+
+// ============================================================
+// EXECUTIONS
+// ============================================================
+
+model Execution {
+  id             String          @id @default(uuid())
+  workspaceId    String
+  routineId      String
+  assignedToId   String?
+  executedById   String?
+  status         ExecutionStatus @default(pending)
+  dueAt          DateTime
+  executedAt     DateTime?
+  notes          String?
+  evidenceUrl    String?
+  checklistState Json            @default("{}")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  routine    Routine   @relation(fields: [routineId], references: [id], onDelete: Cascade)
+  assignedTo User?     @relation("ExecutionAssignedTo", fields: [assignedToId], references: [id])
+  executedBy User?     @relation("ExecutionExecutedBy", fields: [executedById], references: [id])
+
+  @@index([workspaceId])
+  @@index([routineId])
+  @@index([workspaceId, status])
+  @@index([workspaceId, dueAt])
+  @@index([assignedToId, status])
+  @@map("executions")
+}
+
+// ============================================================
+// ACTIVITY LOGS — Audit Trail (append-only)
+// ============================================================
+
+model ActivityLog {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  actorId       String?   // NULL = sistema
+  action        LogAction
+  entityType    String    @db.VarChar(50)
+  entityId      String?
+  payloadBefore Json?
+  payloadAfter  Json?
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor     User?     @relation(fields: [actorId], references: [id])
+
+  @@index([workspaceId])
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([workspaceId, createdAt(sort: Desc)])
+  @@map("activity_logs")
+}
+
+// ============================================================
+// PLAN QUOTAS
+// ============================================================
+
+model PlanQuota {
+  plan                   PlanTier @id
+  maxUsers               Int      // -1 = unlimited
+  maxRoutines            Int
+  maxExecutionsHistoryDays Int    // -1 = unlimited
+  canExport              Boolean  @default(false)
+  canApiAccess           Boolean  @default(false)
+  canMultiUnit           Boolean  @default(false)
+  canAuditTrail          Boolean  @default(false)
+  maxFileSizeMb          Int      @default(5)
+
+  @@map("plan_quotas")
+}
