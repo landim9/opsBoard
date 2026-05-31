@@ -4,17 +4,23 @@ node_modules
 # Build artifacts
 dist
 build
-.next
 out
 
-# Local dev scripts (não devem ir pro repositório)
-*.bat
-*.sh
+# Next.js build output — nunca versionar
+apps/web/.next
+.next
 
-# Environment variables
+# Environment variables (não versionar valores reais)
 .env
 .env.local
 .env.*.local
+
+# .env.example DEVE ser versionado — serve como documentação
+!.env.example
+
+# Scripts locais de desenvolvimento (nunca devem ir pro repositório)
+*.bat
+*.sh
 
 # Logs
 *.log
@@ -28,3 +34,7 @@ Thumbs.db
 
 # Turbo
 .turbo
+
+# Editor
+.vscode/settings.json
+.idea
