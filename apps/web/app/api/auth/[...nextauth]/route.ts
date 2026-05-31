@@ -1,24 +1,57 @@
-import NextAuth, { NextAuthOptions } from "next-auth"
-import CredentialsProvider from "next-auth/providers/credentials"
-// import GoogleProvider from "next-auth/providers/google"
-// import { prisma } from "@opsboard/db"
+import NextAuth, { NextAuthOptions } from 'next-auth'
+import CredentialsProvider from 'next-auth/providers/credentials'
+import prisma from '@opsboard/db'
+import bcrypt from 'bcryptjs'
+// import GoogleProvider from 'next-auth/providers/google'
 
 export const authOptions: NextAuthOptions = {
   providers: [
     CredentialsProvider({
-      name: "Credentials",
+      name: 'Credentials',
       credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" }
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials) {
-        // Stub for development. In prod, verify against Prisma.
-        if (credentials?.email === "admin@opsboard.com" && credentials?.password === "admin") {
-          return { id: "1", name: "Admin", email: "admin@opsboard.com", workspaceId: "ws-1", role: "owner", plan: "pro" }
+        if (!credentials?.email || !credentials?.password) return null
+
+        // TODO: Remover stub e descomentar quando o banco estiver configurado
+        // const user = await prisma.user.findUnique({
+        //   where: { email: credentials.email },
+        //   include: { memberships: { take: 1, orderBy: { createdAt: 'asc' } } },
+        // })
+        // if (!user || !user.passwordHash) return null
+        // const valid = await bcrypt.compare(credentials.password, user.passwordHash)
+        // if (!valid) return null
+        // return {
+        //   id: user.id,
+        //   name: user.name,
+        //   email: user.email,
+        //   workspaceId: user.memberships[0]?.workspaceId ?? null,
+        //   role: user.memberships[0]?.role ?? 'executor',
+        //   plan: 'free',
+        // }
+
+        // ⚠️ STUB DE DESENVOLVIMENTO — NÃO USAR EM PRODUÇÃO
+        // Credenciais definidas via variáveis de ambiente para não expor no código
+        const devEmail = process.env.DEV_STUB_EMAIL
+        const devPassword = process.env.DEV_STUB_PASSWORD
+
+        if (!devEmail || !devPassword) return null
+
+        if (credentials.email === devEmail && credentials.password === devPassword) {
+          return {
+            id: 'stub-1',
+            name: 'Dev User',
+            email: devEmail,
+            workspaceId: 'ws-stub-1',
+            role: 'owner',
+            plan: 'pro',
+          }
         }
         return null
-      }
-    })
+      },
+    }),
   ],
   callbacks: {
     async jwt({ token, user }) {
@@ -32,20 +65,20 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       if (session.user) {
-        (session.user as any).id = token.id;
-        (session.user as any).workspaceId = token.workspaceId;
-        (session.user as any).role = token.role;
-        (session.user as any).plan = token.plan;
+        ;(session.user as any).id = token.id
+        ;(session.user as any).workspaceId = token.workspaceId
+        ;(session.user as any).role = token.role
+        ;(session.user as any).plan = token.plan
       }
       return session
-    }
+    },
   },
   pages: {
     signIn: '/login',
   },
   session: {
-    strategy: "jwt",
-  }
+    strategy: 'jwt',
+  },
 }
 
 const handler = NextAuth(authOptions)
